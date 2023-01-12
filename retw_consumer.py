@@ -1,18 +1,18 @@
 from __future__ import print_function
-import mysql.connector
 
 import sys
 import time, json
 from datetime import datetime
-import pyspark
+import os
+os.environ["PYSPARK_SUBMIT_ARGS"] = '--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.1,org.apache.commons:commons-pool2:2.6.2,org.apache.kafka:kafka-clients:2.7.0,org.apache.spark:spark-streaming-kafka-0-10-assembly_2.12:3.3.1 spark-shell'
+
 from pyspark import SparkConf, SparkContext
 from pyspark.streaming import StreamingContext
 # from pyspark.streaming.kafka import KafkaUtils
-from pyspark.streaming.dstream import TransformedDStream
 
+from pyspark.sql import *
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
-from pyspark.sql import *
 
 # import pyspark_cassandra # saveToCassandra 함수, package 추가 필요
 
@@ -21,6 +21,7 @@ tweet_schema = [
     'id',
     'created_at',
     'truncated',
+    'retweeted',
     'text',
     'quote_count',
     'reply_count',
@@ -32,7 +33,8 @@ tweet_schema = [
     'is_quote_status',
     'quoted_status', # 생략 가능 # 내부 정보
     'lang',
-] # user, quoted_status, retweeted, retweeted_status, in_reply_to_status_id 은 따로 처리
+] # user, quoted_status, in_reply_to_status_id 은 따로 처리
+
 
 user_schema = [
     'id', 
@@ -71,12 +73,14 @@ media_schema = [
     'type'
 ]
 
-def retweet_filter(RDD):
+# JSON 형태의 RDD 필터링 함수
+def tweet_filter(RDD):
     filtered = {}
     try:
         # text가 아닌 full_text인 경우 처리
         if "text" not in RDD and "full_text" in RDD:
             RDD["text"] = RDD["full_text"]
+            #del RDD["full_text"]
 
         # Reply 판단 후 처리
         if RDD["in_reply_to_status_id"]:
@@ -102,7 +106,7 @@ def retweet_filter(RDD):
             isExisting = list(filter(quoted_lambda, RDD["quoted_status"].keys()))
             for key in isExisting:
                 filtered["quoted_status"][key] = RDD["quoted_status"][key]
-
+                
             filtered["quoted_status"]["user"] = {}
             for key in user_schema:
                 filtered["quoted_status"]["user"][key] = RDD["quoted_status"]["user"][key]
@@ -136,47 +140,27 @@ def retweet_filter(RDD):
         # struct 변환 타입 모두 덤프로
         struct_type = ["user", "quoted_status", "entities", "extended_entities", "extended_tweet"]
         for type in struct_type:
-            if type not in filtered:
+            if type in filtered:
+                filtered[type] = json.dumps(filtered[type])
+            else:
                 filtered[type] = None
-
-        # date 추가
-        datetime_object = datetime.strptime(filtered["created_at"], "%a %b %d %H:%M:%S %z %Y")
-        filtered["date"] = datetime_object.date().__str__()
-        filtered["timestamp"] = int(time.time()*1000000)
-
-    except:
-        print("**********TWEET FILTER ERROR OCCUR**********")
-        print("Unexpected error:", sys.exc_info()[0])
-        print(RDD)
-    
-    return filtered
-    
-
-# JSON 형태의 RDD 필터링 함수
-def retweet_parser(RDD):
-    filtered = {}
-    try:
-        filtered["retweeted_status"] = retweet_filter(RDD["retweeted_status"])
-        filtered["retweeted"] = True
-        
-        filtered["id"] = RDD["id"]
-        filtered["created_at"] = RDD["created_at"]
-        filtered["lang"] = RDD["lang"]
-
-        # user_schema 처리
-        filtered["user"] = {}
-        for key in user_schema:
-            filtered["user"][key] = RDD["user"][key]
-
-        # struct 변환 타입 모두 덤프로
-        filtered["retweeted_status"] = json.dumps(filtered["retweeted_status"])
 
         # date 추가
         #datetime_object = datetime.strptime(filtered["created_at"], "%a %b %d %H:%M:%S %z %Y")
         filtered["date"] = datetime.now().date().__str__()
         filtered["hour"] = datetime.now().hour
-        filtered["minute"] = int(datetime.now().minute / 5)
         filtered["timestamp"] = int(time.time()*1000000)
+        
+
+        # usertags, hashtags 추가
+        filtered["usertags"] = []
+        filtered["usertags"] += [RDD["user"]["name"], RDD["user"]["screen_name"]]
+        filtered["hashtags"] = []
+        filtered["hashtags"] += [RDD["user"]["name"], RDD["user"]["screen_name"]]
+        if RDD["truncated"]:
+            filtered["hashtags"] += RDD["extended_tweet"]["full_text"].split(" ") 
+        else:
+            filtered["hashtags"] += RDD["text"].split(" ") 
 
     except:
         print("**********TWEET FILTER ERROR OCCUR**********")
@@ -184,35 +168,31 @@ def retweet_parser(RDD):
         print(RDD)
     
     return filtered
-
+      
 
 if __name__ == "__main__":
-
-    kafka_bootstrap_servers = 'localhost:9092'
-    topic = 'retweets'
-
-    spark = SparkSession.builder.appName("retw_streaming").getOrCreate()
-
-    kafka_stream = spark \
-    .readStream\
-    .option("user", "root").option("password", "lgg032800") \
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
-    .option("subscribe", topic) \
-    .load()
-
-    # conf = SparkConf()
-    # conf.setAppName("whate")
-    # conf.option("kafka.bootstrap.servers", kafka_bootstrap_servers)
-    # conf.option("subscribe", topic)
-    # conf = SparkContext.appName("none").option("kafka.bootstrap.servers", kafka_bootstrap_servers).option("subscribe", topic)
-    # .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
     # conf = SparkConf()
     # conf.setAppName("Streamer")
-    # # conf.set("spark.cassandra.connection.host", "127.0.0.1")
-    # # conf.set("spark.cassandra.connection.host", "10.240.14.37")
-    # # conf.set("spark.cassandra.connection.port", "9042")
 
+    kafka_bootstrap_servers = 'localhost:9092'
+    topic = "retweets"
+
+    spark = SparkSession \
+        .builder \
+        .appName("retw_streming") \
+        .getOrCreate()
+
+    kafkaStream = spark \
+        .readStream \
+        .format("jdbc") \
+        .option("url", "jdbc:mysql://localhost:3306/stream") \
+        .option("driver", "com.mysql.jdbc.Driver") \
+        .option("dbtable", "NewTable") \
+        .option("user", "root").option("password", "lgg032800") \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
+        .option("subscribe", topic) \
+        .load()
     # # SparkContext represents the connection to a Spark cluster
     # # Only one SparkContext may be active per JVM
     # sc = SparkContext(conf=conf)
@@ -222,51 +202,41 @@ if __name__ == "__main__":
     # # including checkpointing and transformations of the RDD.
     # ssc = StreamingContext(sc, 3)
 
-    # DStream 반환 (RDD로 이루어진 객체) (RDD 스파크 데이터 단위)
-    # kafkaStream = TransformedDStream( ssc, ["retweets"],  {"bootstrap.servers": "localhost:9092"})
-    
+    # # DStream 반환 (RDD로 이루어진 객체) (RDD 스파크 데이터 단위)
+    # kafkaStream = TransformedDStream(
+    #     ssc, 
+    #     topics = ["tweets"], 
+    #     kafkaParams = {"bootstrap.servers": "localhost:9092"}
+    #         #"group.id" -> "spark-streaming-notes",
+    #         #"auto.offset.reset" -> "earliest")
+    # )
+
+
     # kafkaStream = KafkaUtils.createDirectStream(
     #     ssc, 
-    #     topics = ["retweets"], 
+    #     topics = ["tweets"], 
     #     kafkaParams = {"bootstrap.servers": "localhost:9092"}
-            #"group.id" -> "spark-streaming-notes",
-            #"auto.offset.reset" -> "earliest"
+    #         #"group.id" -> "spark-streaming-notes",
+    #         #"auto.offset.reset" -> "earliest"
     # )
 
     #Parse Twitter Data as json
-    # print(kafka_stream)
+    json_stream = kafkaStream.map(lambda tweet: json.loads(tweet[1]))
+    # print(json_stream)
+    parsed = json_stream.map(lambda tweet: tweet_filter(tweet))
+    parsed.foreachRDD(lambda x: x.saveToCassandra("bts", "tweet_dataset"))
+    #parsed.pprint()
 
-    # print(kafka_stream.isStreaming)
-    # print(kafka_stream.printSchema())
-
-
-    # kafka_stream1 = spark \
-    # .writeStream \
-    # .format("kafka") \
-    # .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
-    # .option("subscribe", topic) \
-    # .start()
-
-    # print(kafka_stream)
-    # a = kafka_stream.textFileStream(kafka_stream)
-
-    kafka_stream.write.format("jdbc") \
-        .option("driver","com.mysql.cj.jdbc.Driver") \
-        .option("user","root") \
-        .option("password","lgg032800") \
-        .option("url","jdbc:mysql://localhost:3306") \
-        .option("dbtable","stream.spark_edit") \
-        .save()
-
-    query = kafka_stream.writeStream.format("console").start().awaitTermination()
-    kafka_stream = query.rdd
-    # query = kafka_stream.writeStream.format("console").start()
-    # print(type(kafka_stream))
-    json_stream = kafka_stream.map(lambda topic: json.loads(topic[1]))
-    # # print(json_stream)
-    parsed = json_stream.map(lambda tweet: retweet_parser(tweet))  
-    # parsed.foreachRDD(lambda x: x.saveToCassandra("bts", "retweet_dataset"))
-    parsed.pprint()
     #Start Execution of Streams
     spark.start()
     spark.awaitTermination()
+
+    # outputDir = 'C:\Users\youngdong'
+    # checkpointDir = 'C:\Users\youngdong'
+    # resultDir = 'abc.json'
+    
+    # streamingQuery = resultDir.writeStream \
+    #     .fotmat('json') \
+    #     .option("path", outputDir) \
+    #     .option("checkpointLocation", checkpointDir) \
+    #     .start()

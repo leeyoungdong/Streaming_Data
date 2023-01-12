@@ -9,13 +9,20 @@ from pyspark import SparkConf, SparkContext
 from pyspark.streaming import StreamingContext
 # from pyspark.streaming.kafka import KafkaUtils
 from pyspark.streaming.dstream import TransformedDStream
-
+from pyspark.sql.functions import col, lit
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from pyspark.sql import *
 
 # import pyspark_cassandra # saveToCassandra 함수, package 추가 필요
-
+kafka_bootstrap_servers = "localhost:9092"
+kafka_topic_name = "retweets"
+customers_data_file_path = "file:////mnt/92D26AE0D26AC7D5/Python/chamath_kafka_with_pyspark/data_source/customers.csv"
+mysql_driver_class = "com.mysql.jdbc.Driver"
+mysql_table_name = "newtable"
+mysql_user_name = "root"
+mysql_password = "lgg032800"
+mysql_jdbc_url = "jdbc:mysql://localhost:3306/stream?createDatabaseIfNotExist=true"
 # 처리를 위해 필요한 스키마 1. Tweet 2. User 3. Quoted
 tweet_schema = [
     'id',
@@ -186,6 +193,33 @@ def retweet_parser(RDD):
     return filtered
 
 
+def save_to_mysql_database(current_df, batch_id):
+    processed_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    current_df_final = current_df \
+        .withColumn("processed_at", lit(processed_at)) \
+        .withColumn("batch_id", lit(batch_id))
+
+    print(current_df_final.printSchema())
+    print("Printing before Msql table save: " + str(batch_id))
+    #새 테이블 생성
+    # current_df_final \
+    #     .write \
+    #     .format("jdbc") \
+    #     .option("driver","com.mysql.cj.jdbc.Driver") \
+    #     .option("user","root") \
+    #     .option("password","lgg032800") \
+    #     .option("url","jdbc:mysql://localhost:3306") \
+    #     .option("dbtable","stream.spark_edit") \
+    #     .save()
+
+    current_df_final.write.mode("overwrite").format("jdbc") \
+            .option("driver","com.mysql.cj.jdbc.Driver") \
+            .option("user","root") \
+            .option("password","lgg032800") \
+            .option("url","jdbc:mysql://localhost:3306") \
+            .option("dbtable","stream.spark_edit") \
+            .save()
+
 if __name__ == "__main__":
 
     kafka_bootstrap_servers = 'localhost:9092'
@@ -195,49 +229,11 @@ if __name__ == "__main__":
 
     kafka_stream = spark \
     .readStream\
-    .option("user", "root").option("password", "lgg032800") \
     .format("kafka") \
     .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
     .option("subscribe", topic) \
     .load()
 
-    # conf = SparkConf()
-    # conf.setAppName("whate")
-    # conf.option("kafka.bootstrap.servers", kafka_bootstrap_servers)
-    # conf.option("subscribe", topic)
-    # conf = SparkContext.appName("none").option("kafka.bootstrap.servers", kafka_bootstrap_servers).option("subscribe", topic)
-    # .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
-    # conf = SparkConf()
-    # conf.setAppName("Streamer")
-    # # conf.set("spark.cassandra.connection.host", "127.0.0.1")
-    # # conf.set("spark.cassandra.connection.host", "10.240.14.37")
-    # # conf.set("spark.cassandra.connection.port", "9042")
-
-    # # SparkContext represents the connection to a Spark cluster
-    # # Only one SparkContext may be active per JVM
-    # sc = SparkContext(conf=conf)
-
-    # # Creating a streaming context with batch interval of 10 sec
-    # # As the main point of entry for streaming, StreamingContext handles the streaming application's actions, 
-    # # including checkpointing and transformations of the RDD.
-    # ssc = StreamingContext(sc, 3)
-
-    # DStream 반환 (RDD로 이루어진 객체) (RDD 스파크 데이터 단위)
-    # kafkaStream = TransformedDStream( ssc, ["retweets"],  {"bootstrap.servers": "localhost:9092"})
-    
-    # kafkaStream = KafkaUtils.createDirectStream(
-    #     ssc, 
-    #     topics = ["retweets"], 
-    #     kafkaParams = {"bootstrap.servers": "localhost:9092"}
-            #"group.id" -> "spark-streaming-notes",
-            #"auto.offset.reset" -> "earliest"
-    # )
-
-    #Parse Twitter Data as json
-    # print(kafka_stream)
-
-    # print(kafka_stream.isStreaming)
-    # print(kafka_stream.printSchema())
 
 
     # kafka_stream1 = spark \
@@ -249,17 +245,17 @@ if __name__ == "__main__":
 
     # print(kafka_stream)
     # a = kafka_stream.textFileStream(kafka_stream)
-
-    kafka_stream.write.format("jdbc") \
-        .option("driver","com.mysql.cj.jdbc.Driver") \
-        .option("user","root") \
-        .option("password","lgg032800") \
-        .option("url","jdbc:mysql://localhost:3306") \
-        .option("dbtable","stream.spark_edit") \
-        .save()
-
-    query = kafka_stream.writeStream.format("console").start().awaitTermination()
+    query = kafka_stream.writeStream.outputMode("update").foreachBatch(save_to_mysql_database).start().awaitTermination()
     kafka_stream = query.rdd
+    # a = kafka_stream \
+    # .writeStream \
+    # .trigger(processingTime="3 seconds") \
+	# .outputMode("update") \
+	# .foreachBatch(save_to_mysql_database) \
+	# .start() \
+	# .awaitTermination() \
+	
+
     # query = kafka_stream.writeStream.format("console").start()
     # print(type(kafka_stream))
     json_stream = kafka_stream.map(lambda topic: json.loads(topic[1]))
@@ -267,6 +263,7 @@ if __name__ == "__main__":
     parsed = json_stream.map(lambda tweet: retweet_parser(tweet))  
     # parsed.foreachRDD(lambda x: x.saveToCassandra("bts", "retweet_dataset"))
     parsed.pprint()
+
     #Start Execution of Streams
     spark.start()
     spark.awaitTermination()
