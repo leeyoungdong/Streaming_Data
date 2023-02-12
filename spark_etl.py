@@ -2,7 +2,7 @@ import os
 
 os.environ[
     "PYSPARK_SUBMIT_ARGS"
-] = "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.1,org.elasticsearch:elasticsearch-spark-30_2.12:7.14.2 pyspark-shell"
+] = Spark_package
 
 import json
 
@@ -19,56 +19,30 @@ from pyspark import SparkContext
 # from kafka import KafkaConsumer
 from elasticsearch import Elasticsearch
 from subprocess import check_output
+from topic_subject import *
 
-es = Elasticsearch(hosts=['localhost'], port=9200)
 
-topic = "flight-realtime"
-ETH0_IP = check_output(["hostname"]).decode(encoding="utf-8").strip()
+def getrows(Dataframe, rownums=None):
+    return Dataframe.rdd.zipWithIndex().filter(lambda x: x[1] in rownums).map(lambda x: x[0])
 
-SPARK_MASTER_URL = "local[*]"
-SPARK_DRIVER_HOST = ETH0_IP
+def spark()
 
-spark_conf = SparkConf()
-spark_conf.setAll(
-    [
-        ("spark.master", SPARK_MASTER_URL),
-        ("spark.driver.bindAddress", "0.0.0.0"),
-        ("spark.driver.host", SPARK_DRIVER_HOST),
-        ("spark.app.name", "Flight-infos"),
-        ("spark.submit.deployMode", "client"),
-        ("spark.ui.showConsoleProgress", "true"),
-        ("spark.eventLog.enabled", "false"),
-        ("spark.logConf", "false"),
-    ]
-)
-
-def getrows(df, rownums=None):
-    return df.rdd.zipWithIndex().filter(lambda x: x[1] in rownums).map(lambda x: x[0])
-
-if __name__ == "__main__":
-    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
-
-    df = (
-        spark.readStream.format("kafka")
-        .option("kafka.bootstrap.servers", "localhost:9092")
-        .option("subscribe", "flight-realtime")
-        .option("enable.auto.commit", "true")
-        .load()
-    )
-    def func_call(df, batch_id):
+def func_call(df, batch_id):
+        
         df.selectExpr("CAST(value AS STRING) as json")
+        
         requests = df.rdd.map(lambda x: x.value).collect()
         flight = getrows(df,rownums=[0]).collect()
+        
         for i in flight:
-           #print(i)
+        
            print(i[1].decode("utf-8"))
-           hex = i[1].decode("utf-8")
-           #print(hex[9:15])
+           hex = i[1].decode("utf-8")        
            dictio = eval(hex)
            print(type(dictio))
       
            print("writing_to_Elasticsearch")
+
            es.index(
                     index="flight-realtime-project",
                     doc_type="test_doc",
@@ -92,13 +66,35 @@ if __name__ == "__main__":
 		            "airline_iata": dictio["airline_iata"],
 		            "aircraft_icao": dictio["aircraft_icao"],
 		            "updated": dictio["updated"],
-		            "status": dictio["status"]
-                    
-                    
+		            "status": dictio["status"]                                        
                     }
                 )
 
-           
+
+if __name__ == "__main__":
+
+    es = Elasticsearch(hosts=['localhost'], port=9200)
+
+    topic = topic_f_r
+
+    spark_conf = SparkConf()
+    spark_conf.setAll(spark_air_realtime_conf
+    )
+
+
+    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
+    spark.sparkContext.setLogLevel("ERROR")
+
+    df = (
+        spark.readStream.format("kafka")
+        .option("kafka.bootstrap.servers", "localhost:9092")
+        .option("subscribe", "flight-realtime")
+        .option("enable.auto.commit", "true")
+        .load()
+    )
+
+
+    
     query = df.writeStream \
     .format('console') \
     .foreachBatch(func_call) \
